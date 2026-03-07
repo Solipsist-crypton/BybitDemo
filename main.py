@@ -1,110 +1,90 @@
 import os
 import time
-import requests
+import telebot
 import pandas as pd
 from pybit.unified_trading import HTTP
 import strategy
+from threading import Thread
 
-# --- ЧИТАННЯ ЗМІННИХ З СЕРВЕРА ---
+# --- КОНФІГУРАЦІЯ ---
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- КОНФІГУРАЦІЯ ---
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
-QTY_LIST = {
-    "BTCUSDT": 0.001, 
-    "ETHUSDT": 0.01, 
-    "SOLUSDT": 1.0, 
-    "XRPUSDT": 100.0, 
-    "ADAUSDT": 100.0
-}
-LEVERAGE = 10
+QTY_LIST = {"BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 1.0, "XRPUSDT": 100.0, "ADAUSDT": 100.0}
 
-# Підключення до Demo-серверу Bybit
-session = HTTP(
-    testnet=False, 
-    demo=True, 
-    api_key=API_KEY, 
-    api_secret=API_SECRET,
-    recv_window=60000
-)
+bot = telebot.TeleBot(TG_TOKEN)
+session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
-def send_tg_with_buttons(message):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": message,
-        "reply_markup": {
-            "inline_keyboard": [
-                [{"text": "📊 Мої Позиції", "url": "https://www.bybit.com/trading-demo/v5/trade/futures/BTCUSDT"}],
-                [{"text": "📈 Оновити статус", "callback_data": "refresh"}]
-            ]
-        }
-    }
+def get_report():
+    """Створює текстовий звіт про поточний стан"""
     try:
-        requests.post(url, json=payload)
+        pos = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
+        active = [p for p in pos if float(p['size']) > 0]
+        
+        if not active:
+            return "📭 Активних позицій немає."
+        
+        report = "📊 ПОТОЧНИЙ СТАТУС:\n"
+        total_pnl = 0
+        for p in active:
+            pnl = float(p['unrealisedPnl'])
+            total_pnl += pnl
+            report += f"🔹 {p['symbol']} | {p['side']}\n   PnL: {pnl:.2f} USDT\n"
+        
+        report += f"\n💰 ЗАГАЛЬНИЙ PnL: {total_pnl:.2f} USDT"
+        return report
     except Exception as e:
-        print(f"Помилка TG: {e}")
+        return f"❌ Помилка отримання даних: {e}"
 
-def get_candles(symbol):
-    try:
-        res = session.get_kline(category="linear", symbol=symbol, interval="5", limit=200)
-        df = pd.DataFrame(res['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
-        df['close'] = df['close'].astype(float)
-        return df.iloc[::-1].reset_index(drop=True)
-    except:
-        return None
+# Обробка натискання кнопки "Оновити статус"
+@bot.callback_query_handler(func=lambda call: call.data == "refresh")
+def callback_refresh(call):
+    status_text = get_report()
+    # Створюємо кнопки знову, щоб вони не зникли
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(telebot.types.InlineKeyboardButton("📈 Оновити статус", callback_data="refresh"))
+    bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-def manage_positions():
-    """Функція для перевірки та підтягування Trailing Stop"""
-    try:
-        positions = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
-        for p in positions:
-            if float(p['size']) > 0:
-                symbol = p['symbol']
-                side = p['side']
-                curr_price = float(p['markPrice'])
-                curr_sl = float(p['stopLoss']) if p['stopLoss'] else 0
-                
-                new_sl = strategy.calculate_trailing_stop(curr_sl, curr_price, side)
-                
-                # Якщо стоп змінився суттєво (наприклад, більше ніж на 0.1%), оновлюємо
-                if abs(new_sl - curr_sl) > (curr_price * 0.001):
-                    session.set_trading_stop(
-                        category="linear", symbol=symbol, 
-                        stopLoss=str(round(new_sl, 4)), slTriggerBy="MarkPrice"
-                    )
-    except Exception as e:
-        print(f"Помилка трейлінгу: {e}")
-
-def run_bot():
-    send_tg_with_buttons("🎯 СНАЙПЕР ЗАПУЩЕНИЙ (DEMO)\nРежим: Trailing Stop Активовано.\nМонети: BTC, ETH, SOL, XRP, ADA")
-    
+def trading_loop():
+    """Основний цикл бота (торгівля + трейлінг)"""
     while True:
-        # 1. Перевірка сигналів для відкриття нових угод
         for symbol in SYMBOLS:
-            df = get_candles(symbol)
-            if df is not None:
+            try:
+                # Отримання свічок та перевірка сигналів
+                res = session.get_kline(category="linear", symbol=symbol, interval="5", limit=200)
+                df = pd.DataFrame(res['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
+                df['close'] = df['close'].astype(float)
+                df = df.iloc[::-1].reset_index(drop=True)
+
                 signal = strategy.check_signals(df)
                 if signal != "WAIT":
                     side = "Buy" if signal == "BUY" else "Sell"
-                    try:
-                        order = session.place_order(
-                            category="linear", symbol=symbol, side=side,
-                            orderType="Market", qty=str(QTY_LIST[symbol])
-                        )
-                        send_tg_with_buttons(f"🚀 ВХІД У ПОЗИЦІЮ!\n🔥 {symbol} | {side}\n💸 Ціна: {df['close'].iloc[-1]}")
-                    except Exception as e:
-                        print(f"Помилка ордера {symbol}: {e}")
-            time.sleep(1) # Пауза між монетами
+                    session.place_order(category="linear", symbol=symbol, side=side, orderType="Market", qty=str(QTY_LIST[symbol]))
+                    bot.send_message(TG_CHAT_ID, f"🚀 НОВА УГОДА: {symbol} | {side}")
 
-        # 2. Управління вже відкритими позиціями (Trailing Stop)
-        manage_positions()
-        
-        print(f"⏱ [{time.strftime('%H:%M:%S')}] Скан завершено. Чекаю 60с...")
+                # Трейлінг стоп
+                positions = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
+                for p in positions:
+                    if float(p['size']) > 0 and p['symbol'] == symbol:
+                        new_sl = strategy.calculate_trailing_stop(float(p['stopLoss'] or 0), float(p['markPrice']), p['side'])
+                        if abs(new_sl - float(p['stopLoss'] or 0)) > (float(p['markPrice']) * 0.001):
+                            session.set_trading_stop(category="linear", symbol=symbol, stopLoss=str(round(new_sl, 4)), slTriggerBy="MarkPrice")
+
+            except Exception as e:
+                print(f"Помилка {symbol}: {e}")
         time.sleep(60)
 
 if __name__ == "__main__":
-    run_bot()
+    # Запускаємо торгівлю в окремому потоці, щоб Telegram завжди відповідав на кнопки
+    Thread(target=trading_loop).start()
+    
+    # Початкове повідомлення
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(telebot.types.InlineKeyboardButton("📈 Оновити статус", callback_data="refresh"))
+    bot.send_message(TG_CHAT_ID, "🎯 Снайпер онлайн! Трейлінг та кнопки активовані.", reply_markup=markup)
+    
+    # Запуск прослуховування кнопок
+    bot.polling(none_stop=True)
