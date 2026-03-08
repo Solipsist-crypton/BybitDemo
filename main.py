@@ -18,17 +18,13 @@ QTY_LIST = {"BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 1.0, "XRPUSDT": 100.0,
 bot = telebot.TeleBot(TG_TOKEN)
 session = HTTP(testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
-# Словник для відстеження активних позицій (щоб знати, коли вони зникнуть)
 active_tracking = {}
 
 def get_detailed_report():
     try:
-        time.sleep(0.5)
         res = session.get_positions(category="linear", settleCoin="USDT")
         active = [p for p in res['result']['list'] if float(p['size']) > 0]
-        
-        if not active:
-            return "📭 Активних позицій немає."
+        if not active: return "📭 Активних позицій немає."
         
         report = "📊 *ПОТОЧНІ УГОДИ:*\n"
         total_pnl = 0
@@ -48,12 +44,11 @@ def callback_refresh(call):
     markup.add(telebot.types.InlineKeyboardButton("🔄 Оновити статус", callback_data="refresh"))
     try:
         bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-    except:
-        pass
+    except: pass
 
 def trading_loop():
     global active_tracking
-    print("🚀 Бот почав роботу...")
+    print("🚀 Бот у роботі. Регіон: Нідерланди. Моніторинг закриття увімкнено.")
     
     while True:
         try:
@@ -61,28 +56,35 @@ def trading_loop():
             res = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
             current_active = {p['symbol']: p for p in res if float(p['size']) > 0}
 
-            # 2. ПЕРЕВІРКА НА ЗАКРИТТЯ (було в active_tracking, але немає в current_active)
+            # 2. ПЕРЕВІРКА НА ЗАКРИТТЯ (Реальний PnL з історії)
             for symbol in list(active_tracking.keys()):
                 if symbol not in current_active:
-                    old_p = active_tracking[symbol]
-                    # Отримуємо останню ціну для звіту
-                    close_price = float(session.get_tickers(category="linear", symbol=symbol)['result']['list'][0]['lastPrice'])
-                    pnl = float(old_p.get('unrealisedPnl', 0)) # Приблизний PnL на момент останнього скану
+                    time.sleep(2) # Даємо біржі час оновити історію
+                    closed_res = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
                     
-                    msg = (f"🏁 *УГОДА ЗАКРИТА: {symbol}*\n"
-                           f"💰 Приблизний PnL: {pnl:.2f} USDT\n"
-                           f"🏁 Ціна виходу: {close_price}")
+                    if closed_res['result']['list']:
+                        trade = closed_res['result']['list'][0]
+                        f_pnl = float(trade['closedPnl'])
+                        f_exit = float(trade['avgExitPrice'])
+                        f_entry = float(trade['avgEntryPrice'])
+                        
+                        emoji = "✅ ПРОФІТ" if f_pnl > 0 else "❌ СТОП-ЛОСС"
+                        msg = (f"{emoji}: *{symbol}*\n"
+                               f"📈 Вхід: {f_entry:.4f}\n"
+                               f"📉 Вихід: {f_exit:.4f}\n"
+                               f"💰 *Чистий PnL: {f_pnl:.4f} USDT* (з комісією)")
+                    else:
+                        msg = f"🏁 *{symbol} закрита* (дані в обробці...)"
+                    
                     bot.send_message(TG_CHAT_ID, msg, parse_mode="Markdown")
                     del active_tracking[symbol]
 
-            # 3. ПЕРЕВІРКА СИГНАЛІВ ТА ВХІД
+            # 3. АНАЛІЗ ТА ВХІД
             for symbol in SYMBOLS:
                 if symbol in current_active:
-                    # Оновлюємо дані для трекінгу (для майбутнього закриття)
                     active_tracking[symbol] = current_active[symbol]
                     continue
 
-                # Аналіз ринку
                 kline = session.get_kline(category="linear", symbol=symbol, interval="5", limit=200)
                 df = pd.DataFrame(kline['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
                 df['close'] = df['close'].astype(float)
@@ -94,26 +96,22 @@ def trading_loop():
                     session.place_order(category="linear", symbol=symbol, side=side, orderType="Market", qty=str(QTY_LIST[symbol]))
                     bot.send_message(TG_CHAT_ID, f"🚀 *НОВИЙ ВХІД:* {symbol} | {side}", parse_mode="Markdown")
 
-            # 4. УПРАВЛІННЯ TRAILING STOP
+            # 4. TRAILING STOP
             for symbol, p in current_active.items():
                 curr_sl = float(p['stopLoss']) if p['stopLoss'] else 0
-                mark_price = float(p['markPrice'])
-                new_sl = strategy.calculate_trailing_stop(curr_sl, mark_price, p['side'])
-                
-                if abs(new_sl - curr_sl) > (mark_price * 0.0005): # Зменшив поріг чутливості
+                new_sl = strategy.calculate_trailing_stop(curr_sl, float(p['markPrice']), p['side'])
+                if abs(new_sl - curr_sl) > (float(p['markPrice']) * 0.0005):
                     session.set_trading_stop(category="linear", symbol=symbol, stopLoss=str(round(new_sl, 4)), slTriggerBy="MarkPrice")
 
         except Exception as e:
-            print(f"Помилка: {e}")
+            print(f"Error: {e}")
             if "403" in str(e): time.sleep(300)
-            
         time.sleep(60)
 
 if __name__ == "__main__":
     Thread(target=trading_loop, daemon=True).start()
     bot.remove_webhook()
-    
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton("🔄 Оновити статус", callback_data="refresh"))
-    bot.send_message(TG_CHAT_ID, "🤖 *Бот-Снайпер активований!*\nТепер я сповіщатиму про закриття угод.", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(TG_CHAT_ID, "🤖 *Снайпер оновлений!*\nТепер показую реальний PnL з урахуванням комісій.", reply_markup=markup, parse_mode="Markdown")
     bot.polling(none_stop=True)
