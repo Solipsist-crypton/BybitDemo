@@ -134,7 +134,6 @@ if __name__ == "__main__":
         reply_markup=markup
     )
     
-    Thread(target=trading_loop, daemon=True).start()
     
     # Видаляємо старий вебхук, щоб уникнути конфліктів
     bot.remove_webhook() 
