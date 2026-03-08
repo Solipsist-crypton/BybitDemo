@@ -134,5 +134,10 @@ if __name__ == "__main__":
         reply_markup=markup
     )
     
-    # Запуск прослуховування кнопок
+    Thread(target=trading_loop, daemon=True).start()
+    
+    # Видаляємо старий вебхук, щоб уникнути конфліктів
+    bot.remove_webhook() 
+    
+    bot.send_message(TG_CHAT_ID, "🤖 Бот перезапущений. Конфліктів немає!")
     bot.polling(none_stop=True)
