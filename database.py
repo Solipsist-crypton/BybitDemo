@@ -46,3 +46,17 @@ def get_daily_pnl():
     pnl = cursor.fetchone()[0]
     conn.close()
     return pnl or 0.0
+
+def get_stats_by_hour():
+    conn = sqlite3.connect('trading_stats.db')
+    cursor = conn.cursor()
+    # strftime('%H', timestamp) витягує тільки годину з часу закриття угоди
+    cursor.execute('''
+        SELECT strftime('%H', timestamp) as hour, SUM(pnl), COUNT(*) 
+        FROM trades 
+        GROUP BY hour 
+        ORDER BY hour ASC
+    ''')
+    data = cursor.fetchall()
+    conn.close()
+    return data

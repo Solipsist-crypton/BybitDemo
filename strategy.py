@@ -1,9 +1,10 @@
 import pandas as pd
 import pandas_ta as ta
 
-# НАЛАШТУВАННЯ РИЗИКУ
-HARD_STOP_PCT = 0.015  # 1.5% руху ціни (при 20х це -30% від маржі)
-BREAK_EVEN_TRIGGER = 0.012 # 1.2% руху ціни для переходу в нуль
+# НАЛАШТУВАННЯ
+HARD_STOP_PCT = 0.015  # 1.5% (стоп)
+TAKE_PROFIT_PCT = 0.03 # 3.0% (тейк - співвідношення 1:2)
+BREAK_EVEN_TRIGGER = 0.012 
 
 def calculate_qty(symbol_price, target_usd=5, leverage=20):
     if symbol_price <= 0: return 0
@@ -15,6 +16,7 @@ def calculate_qty(symbol_price, target_usd=5, leverage=20):
 
 def check_signals(df):
     if len(df) < 90: return "WAIT"
+    # Використовуємо EMA 13, 34, 89
     ema13 = ta.ema(df['close'], length=13)
     ema34 = ta.ema(df['close'], length=34)
     ema89 = ta.ema(df['close'], length=89)
@@ -27,11 +29,10 @@ def check_signals(df):
     return "WAIT"
 
 def get_stop_loss_price(entry_price, side):
-    """Рахує ціну для жорсткого стоп-лоссу при вході"""
-    if side == "Buy":
-        return round(entry_price * (1 - HARD_STOP_PCT), 4)
-    else:
-        return round(entry_price * (1 + HARD_STOP_PCT), 4)
+    return round(entry_price * (1 - HARD_STOP_PCT), 4) if side == "Buy" else round(entry_price * (1 + HARD_STOP_PCT), 4)
+
+def get_take_profit_price(entry_price, side):
+    return round(entry_price * (1 + TAKE_PROFIT_PCT), 4) if side == "Buy" else round(entry_price * (1 - TAKE_PROFIT_PCT), 4)
 
 def check_break_even(entry_price, current_price, side):
     profit_pct = (current_price - entry_price) / entry_price
