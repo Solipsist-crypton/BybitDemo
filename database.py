@@ -60,3 +60,15 @@ def get_stats_by_hour():
     data = cursor.fetchall()
     conn.close()
     return data
+
+def clear_db():
+    try:
+        conn = sqlite3.connect('trading_stats.db')
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM trades')
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Помилка очищення БД: {e}")
+        return False

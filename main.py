@@ -31,6 +31,7 @@ def get_main_keyboard():
     markup.add("💰 Баланс", "📊 Поточні угоди")
     markup.add("📈 Статистика монет", "📅 Денний звіт")
     markup.add("🕒 Статистика по часам", "⚠️ PANIC SELL")
+    markup.add("🧹 Очистити статистику") # НОВА КНОПКА
     return markup
 
 @bot.message_handler(commands=['start'])
@@ -76,6 +77,12 @@ def handle_messages(message):
                 side = "Sell" if p['side'] == "Buy" else "Buy"
                 session.place_order(category="linear", symbol=p['symbol'], side=side, orderType="Market", qty=p['size'])
         bot.send_message(TG_CHAT_ID, "🛑 ВСЕ ЗАКРИТО")
+    
+    elif message.text == "🧹 Очистити статистику":
+        if database.clear_db():
+            bot.send_message(TG_CHAT_ID, "✅ Статистика успішно видалена. Починаємо з чистого аркуша!", reply_markup=get_main_keyboard())
+        else:
+            bot.send_message(TG_CHAT_ID, "❌ Не вдалося очистити базу даних.")
 
 def trading_loop():
     global active_tracking
