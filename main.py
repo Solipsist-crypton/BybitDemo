@@ -16,7 +16,6 @@ TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 COST_PER_TRADE = 5.0
 LEVERAGE = 20
-# Розширили список до 10 монет
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
            "DOTUSDT", "MATICUSDT", "LTCUSDT", "AVAXUSDT", "LINKUSDT"]
 
@@ -31,12 +30,12 @@ def get_main_keyboard():
     markup.add("💰 Баланс", "📊 Поточні угоди")
     markup.add("📈 Статистика монет", "📅 Денний звіт")
     markup.add("🕒 Статистика по часам", "⚠️ PANIC SELL")
-    markup.add("🧹 Очистити статистику") # НОВА КНОПКА
+    markup.add("🧹 Очистити статистику", "📤 Експорт бази")
     return markup
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(TG_CHAT_ID, "🛡 Бот M15 активований. 10 монет. SL 1.5% / TP 3%.", reply_markup=get_main_keyboard())
+    bot.send_message(TG_CHAT_ID, "🚀 Снайпер об'ємів M15 активований.", reply_markup=get_main_keyboard())
 
 @bot.message_handler(func=lambda message: True)
 def handle_messages(message):
@@ -70,6 +69,15 @@ def handle_messages(message):
         pnl = database.get_daily_pnl()
         bot.send_message(TG_CHAT_ID, f"📅 *PnL за сьогодні:* {pnl:.2f} USDT", parse_mode="Markdown")
 
+    elif message.text == "🧹 Очистити статистику":
+        if database.clear_db(): bot.send_message(TG_CHAT_ID, "🧹 База очищена.")
+        
+    elif message.text == "📤 Експорт бази":
+        try:
+            with open('trading_stats.db', 'rb') as f:
+                bot.send_document(TG_CHAT_ID, f, caption="📂 Файл бази даних для аналізу.")
+        except: bot.send_message(TG_CHAT_ID, "Помилка при експорті.")
+
     elif message.text == "⚠️ PANIC SELL":
         res = session.get_positions(category="linear", settleCoin="USDT")
         for p in res['result']['list']:
@@ -77,12 +85,6 @@ def handle_messages(message):
                 side = "Sell" if p['side'] == "Buy" else "Buy"
                 session.place_order(category="linear", symbol=p['symbol'], side=side, orderType="Market", qty=p['size'])
         bot.send_message(TG_CHAT_ID, "🛑 ВСЕ ЗАКРИТО")
-    
-    elif message.text == "🧹 Очистити статистику":
-        if database.clear_db():
-            bot.send_message(TG_CHAT_ID, "✅ Статистика успішно видалена. Починаємо з чистого аркуша!", reply_markup=get_main_keyboard())
-        else:
-            bot.send_message(TG_CHAT_ID, "❌ Не вдалося очистити базу даних.")
 
 def trading_loop():
     global active_tracking
@@ -91,50 +93,46 @@ def trading_loop():
             pos_res = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
             current_active = {p['symbol']: p for p in pos_res if float(p['size'] or 0) > 0}
 
-            # 1. ОБРОБКА ЗАКРИТТЯ (Без тайм-ауту)
+            # 1. ОБРОБКА ЗАКРИТТЯ
             for symbol in list(active_tracking.keys()):
                 if symbol not in current_active:
                     time.sleep(5)
                     closed = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)['result']['list']
                     if closed:
                         c = closed[0]
-                        database.log_trade(symbol, c['side'], c['avgEntryPrice'], c['avgExitPrice'], float(c['closedPnl'] or 0))
+                        rv = active_tracking[symbol].get('rel_vol', 0)
+                        database.log_trade(symbol, c['side'], c['avgEntryPrice'], c['avgExitPrice'], float(c['closedPnl'] or 0), rv)
                         bot.send_message(TG_CHAT_ID, f"🏁 *ЗАКРИТО {symbol}* | PnL: {c['closedPnl']}")
                     del active_tracking[symbol]
 
             # 2. МОНІТОРИНГ ТА ВХІД
             for symbol in SYMBOLS:
                 if symbol in current_active:
-                    p = current_active[symbol]
                     if symbol not in active_tracking: active_tracking[symbol] = {'time': datetime.now()}
-                    # Безубиток
-                    entry, mark, sl = float(p['avgPrice']), float(p['markPrice']), float(p['stopLoss'])
-                    if entry > 0 and sl != entry and strategy.check_break_even(entry, mark, p['side']):
-                        session.set_trading_stop(category="linear", symbol=symbol, stopLoss=str(entry), slTriggerBy="MarkPrice")
-                        bot.send_message(TG_CHAT_ID, f"🛡 *{symbol}* -> Безубиток.")
                     continue
 
-                # Отримуємо K-лінії для M15
-                kline = session.get_kline(category="linear", symbol=symbol, interval="15", limit=100)
+                kline = session.get_kline(category="linear", symbol=symbol, interval="15", limit=50)
                 df = pd.DataFrame(kline['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
                 df['close'] = df['close'].astype(float)
+                df['high'] = df['high'].astype(float)
+                df['low'] = df['low'].astype(float)
+                df['volume'] = df['volume'].astype(float)
                 df = df.iloc[::-1].reset_index(drop=True)
 
-                signal = strategy.check_signals(df)
+                signal, rel_vol = strategy.check_signals(df)
                 if signal != "WAIT":
                     side = "Buy" if signal == "BUY" else "Sell"
                     price = float(session.get_tickers(category="linear", symbol=symbol)['result']['list'][0]['lastPrice'])
                     qty = strategy.calculate_qty(price, COST_PER_TRADE, LEVERAGE)
-                    sl_price = strategy.get_stop_loss_price(price, side)
-                    tp_price = strategy.get_take_profit_price(price, side)
+                    sl = strategy.get_stop_loss_price(price, side)
+                    tp = strategy.get_take_profit_price(price, side)
                     
                     session.place_order(
                         category="linear", symbol=symbol, side=side, orderType="Market", 
-                        qty=str(qty), stopLoss=str(sl_price), takeProfit=str(tp_price),
-                        slTriggerBy="MarkPrice", tpTriggerBy="MarkPrice"
+                        qty=str(qty), stopLoss=str(sl), takeProfit=str(tp)
                     )
-                    active_tracking[symbol] = {'time': datetime.now()}
-                    bot.send_message(TG_CHAT_ID, f"🚀 *ВХІД {symbol}*\n📦 Лот: {qty}\n🎯 TP: {tp_price}\n🛡 SL: {sl_price}")
+                    active_tracking[symbol] = {'time': datetime.now(), 'rel_vol': rel_vol}
+                    bot.send_message(TG_CHAT_ID, f"🚀 *ВХІД {symbol}* (Vol x{rel_vol})\n🎯 TP: {tp}\n🛡 SL: {sl}")
 
         except Exception as e: print(f"Error: {e}")
         time.sleep(60)

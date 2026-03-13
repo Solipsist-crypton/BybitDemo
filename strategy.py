@@ -1,10 +1,9 @@
 import pandas as pd
-import pandas_ta as ta
 
-# НАЛАШТУВАННЯ
-HARD_STOP_PCT = 0.015  # 1.5% (стоп)
-TAKE_PROFIT_PCT = 0.03 # 3.0% (тейк - співвідношення 1:2)
-BREAK_EVEN_TRIGGER = 0.012 
+VOLUME_MULTIPLIER = 1.8
+BREAKOUT_PERIOD = 5
+STOP_LOSS_PCT = 0.015
+TAKE_PROFIT_PCT = 0.03
 
 def calculate_qty(symbol_price, target_usd=5, leverage=20):
     if symbol_price <= 0: return 0
@@ -15,27 +14,30 @@ def calculate_qty(symbol_price, target_usd=5, leverage=20):
     return round(qty, 1)
 
 def check_signals(df):
-    if len(df) < 90: return "WAIT"
-    # Використовуємо EMA 13, 34, 89
-    ema13 = ta.ema(df['close'], length=13)
-    ema34 = ta.ema(df['close'], length=34)
-    ema89 = ta.ema(df['close'], length=89)
-    last_price = df['close'].iloc[-1]
+    if len(df) < 21: return "WAIT", 0
     
-    if last_price > ema13.iloc[-1] > ema34.iloc[-1] > ema89.iloc[-1]:
-        return "BUY"
-    if last_price < ema13.iloc[-1] < ema34.iloc[-1] < ema89.iloc[-1]:
-        return "SELL"
-    return "WAIT"
+    # Середній об'єм (без поточної свічки)
+    avg_vol = df['volume'].iloc[-21:-1].mean()
+    curr_vol = df['volume'].iloc[-1]
+    rel_vol = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 0
+    
+    # Умова сплеску
+    is_vol_spike = curr_vol > (avg_vol * VOLUME_MULTIPLIER)
+    
+    # Локальні рівні
+    prev_max = df['high'].iloc[-BREAKOUT_PERIOD-1:-1].max()
+    prev_min = df['low'].iloc[-BREAKOUT_PERIOD-1:-1].min()
+    curr_close = df['close'].iloc[-1]
+    
+    if is_vol_spike and curr_close > prev_max:
+        return "BUY", rel_vol
+    if is_vol_spike and curr_close < prev_min:
+        return "SELL", rel_vol
+        
+    return "WAIT", 0
 
-def get_stop_loss_price(entry_price, side):
-    return round(entry_price * (1 - HARD_STOP_PCT), 4) if side == "Buy" else round(entry_price * (1 + HARD_STOP_PCT), 4)
+def get_stop_loss_price(price, side):
+    return round(price * (1 - STOP_LOSS_PCT), 4) if side == "Buy" else round(price * (1 + STOP_LOSS_PCT), 4)
 
-def get_take_profit_price(entry_price, side):
-    return round(entry_price * (1 + TAKE_PROFIT_PCT), 4) if side == "Buy" else round(entry_price * (1 - TAKE_PROFIT_PCT), 4)
-
-def check_break_even(entry_price, current_price, side):
-    profit_pct = (current_price - entry_price) / entry_price
-    if side == "Buy" and profit_pct >= BREAK_EVEN_TRIGGER: return True
-    if side == "Sell" and profit_pct <= -BREAK_EVEN_TRIGGER: return True
-    return False
+def get_take_profit_price(price, side):
+    return round(price * (1 + TAKE_PROFIT_PCT), 4) if side == "Buy" else round(price * (1 - TAKE_PROFIT_PCT), 4)

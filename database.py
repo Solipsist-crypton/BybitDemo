@@ -12,54 +12,48 @@ def init_db():
             entry_price REAL,
             exit_price REAL,
             pnl REAL,
-            timestamp DATETIME,
-            is_weekend INTEGER
+            rel_vol REAL,
+            hour INTEGER,
+            timestamp DATETIME
         )
     ''')
     conn.commit()
     conn.close()
 
-def log_trade(symbol, side, entry, exit, pnl):
+def log_trade(symbol, side, entry, exit, pnl, rel_vol=0):
     conn = sqlite3.connect('trading_stats.db')
     cursor = conn.cursor()
     now = datetime.now()
-    is_weekend = 1 if now.weekday() >= 5 else 0
     cursor.execute('''
-        INSERT INTO trades (symbol, side, entry_price, exit_price, pnl, timestamp, is_weekend)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (symbol, side, entry, exit, pnl, now.strftime('%Y-%m-%d %H:%M:%S'), is_weekend))
+        INSERT INTO trades (symbol, side, entry_price, exit_price, pnl, rel_vol, hour, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (symbol, side, entry, exit, pnl, rel_vol, now.hour, now))
     conn.commit()
     conn.close()
-
-def get_stats_by_coin():
-    conn = sqlite3.connect('trading_stats.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT symbol, SUM(pnl), COUNT(*) FROM trades GROUP BY symbol')
-    data = cursor.fetchall()
-    conn.close()
-    return data
 
 def get_daily_pnl():
     conn = sqlite3.connect('trading_stats.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT SUM(pnl) FROM trades WHERE timestamp >= date('now')")
-    pnl = cursor.fetchone()[0]
+    cursor.execute("SELECT SUM(pnl) FROM trades WHERE date(timestamp) = date('now')")
+    res = cursor.fetchone()[0]
     conn.close()
-    return pnl or 0.0
+    return res or 0
+
+def get_stats_by_coin():
+    conn = sqlite3.connect('trading_stats.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT symbol, SUM(pnl), COUNT(*) FROM trades GROUP BY symbol")
+    res = cursor.fetchall()
+    conn.close()
+    return res
 
 def get_stats_by_hour():
     conn = sqlite3.connect('trading_stats.db')
     cursor = conn.cursor()
-    # strftime('%H', timestamp) витягує тільки годину з часу закриття угоди
-    cursor.execute('''
-        SELECT strftime('%H', timestamp) as hour, SUM(pnl), COUNT(*) 
-        FROM trades 
-        GROUP BY hour 
-        ORDER BY hour ASC
-    ''')
-    data = cursor.fetchall()
+    cursor.execute("SELECT hour, SUM(pnl), COUNT(*) FROM trades GROUP BY hour ORDER BY hour")
+    res = cursor.fetchall()
     conn.close()
-    return data
+    return res
 
 def clear_db():
     try:
@@ -69,6 +63,4 @@ def clear_db():
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
-        print(f"Помилка очищення БД: {e}")
-        return False
+    except: return False
