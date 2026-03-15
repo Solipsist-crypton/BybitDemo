@@ -47,11 +47,13 @@ def handle_messages(message):
         except: bot.send_message(TG_CHAT_ID, "Помилка балансу")
     
     elif message.text == "📊 Поточні угоди":
-        res = session.get_positions(category="linear", settleCoin="USDT")
-        active = [p for p in res['result']['list'] if float(p['size'] or 0) > 0]
-        if not active: bot.send_message(TG_CHAT_ID, "📭 Порожньо"); return
-        for p in active:
-            bot.send_message(TG_CHAT_ID, f"🔹 *{p['symbol']}* | PnL: {p['unrealisedPnl']} USDT", parse_mode="Markdown")
+        try:
+            res = session.get_positions(category="linear", settleCoin="USDT")
+            active = [p for p in res['result']['list'] if float(p['size'] or 0) > 0]
+            if not active: bot.send_message(TG_CHAT_ID, "📭 Порожньо"); return
+            for p in active:
+                bot.send_message(TG_CHAT_ID, f"🔹 *{p['symbol']}* | PnL: {p['unrealisedPnl']} USDT", parse_mode="Markdown")
+        except: bot.send_message(TG_CHAT_ID, "Помилка отримання позицій")
 
     elif message.text == "📈 Статистика монет":
         stats = database.get_stats_by_coin()
@@ -79,12 +81,14 @@ def handle_messages(message):
         except: bot.send_message(TG_CHAT_ID, "Помилка при експорті.")
 
     elif message.text == "⚠️ PANIC SELL":
-        res = session.get_positions(category="linear", settleCoin="USDT")
-        for p in res['result']['list']:
-            if float(p['size'] or 0) > 0:
-                side = "Sell" if p['side'] == "Buy" else "Buy"
-                session.place_order(category="linear", symbol=p['symbol'], side=side, orderType="Market", qty=p['size'])
-        bot.send_message(TG_CHAT_ID, "🛑 ВСЕ ЗАКРИТО")
+        try:
+            res = session.get_positions(category="linear", settleCoin="USDT")
+            for p in res['result']['list']:
+                if float(p['size'] or 0) > 0:
+                    side = "Sell" if p['side'] == "Buy" else "Buy"
+                    session.place_order(category="linear", symbol=p['symbol'], side=side, orderType="Market", qty=p['size'])
+            bot.send_message(TG_CHAT_ID, "🛑 ВСЕ ЗАКРИТО")
+        except: bot.send_message(TG_CHAT_ID, "Помилка Panic Sell")
 
 def trading_loop():
     global active_tracking
@@ -97,44 +101,66 @@ def trading_loop():
             for symbol in list(active_tracking.keys()):
                 if symbol not in current_active:
                     time.sleep(5)
-                    closed = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)['result']['list']
-                    if closed:
-                        c = closed[0]
-                        rv = active_tracking[symbol].get('rel_vol', 0)
-                        database.log_trade(symbol, c['side'], c['avgEntryPrice'], c['avgExitPrice'], float(c['closedPnl'] or 0), rv)
-                        bot.send_message(TG_CHAT_ID, f"🏁 *ЗАКРИТО {symbol}* | PnL: {c['closedPnl']}")
+                    try:
+                        closed = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)['result']['list']
+                        if closed:
+                            c = closed[0]
+                            rv = active_tracking[symbol].get('rel_vol', 0)
+                            database.log_trade(symbol, c['side'], c['avgEntryPrice'], c['avgExitPrice'], float(c['closedPnl'] or 0), rv)
+                            bot.send_message(TG_CHAT_ID, f"🏁 *ЗАКРИТО {symbol}* | PnL: {c['closedPnl']}")
+                    except: pass
                     del active_tracking[symbol]
 
-            # 2. МОНІТОРИНГ ТА ВХІД
+            # 2. МОНІТОРИНГ ТА ВХІД / EMERGENCY EXIT
             for symbol in SYMBOLS:
-                if symbol in current_active:
-                    if symbol not in active_tracking: active_tracking[symbol] = {'time': datetime.now()}
-                    continue
+                try:
+                    if symbol in current_active:
+                        if symbol not in active_tracking: 
+                            active_tracking[symbol] = {'time': datetime.now(), 'rel_vol': 0}
+                        
+                        # Додаємо логіку виходу (check_exit_signals має бути в strategy.py)
+                        pos = current_active[symbol]
+                        kline = session.get_kline(category="linear", symbol=symbol, interval="15", limit=2)
+                        df_exit = pd.DataFrame(kline['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
+                        df_exit[['open','high','low','close','volume']] = df_exit[['open','high','low','close','volume']].astype(float)
+                        df_exit = df_exit.iloc[::-1].reset_index(drop=True)
 
-                kline = session.get_kline(category="linear", symbol=symbol, interval="15", limit=50)
-                df = pd.DataFrame(kline['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
-                df['close'] = df['close'].astype(float)
-                df['high'] = df['high'].astype(float)
-                df['low'] = df['low'].astype(float)
-                df['volume'] = df['volume'].astype(float)
-                df = df.iloc[::-1].reset_index(drop=True)
+                        rv_entry = active_tracking[symbol].get('rel_vol', 0)
+                        if hasattr(strategy, 'check_exit_signals'):
+                            if strategy.check_exit_signals(df_exit, pos['side'], rv_entry):
+                                side_to_close = "Sell" if pos['side'] == "Buy" else "Buy"
+                                session.place_order(category="linear", symbol=symbol, side=side_to_close, orderType="Market", qty=pos['size'])
+                                bot.send_message(TG_CHAT_ID, f"⚠️ *EMERGENCY EXIT {symbol}*")
+                        continue
 
-                signal, rel_vol = strategy.check_signals(df)
-                if signal != "WAIT":
-                    side = "Buy" if signal == "BUY" else "Sell"
-                    price = float(session.get_tickers(category="linear", symbol=symbol)['result']['list'][0]['lastPrice'])
-                    qty = strategy.calculate_qty(price, COST_PER_TRADE, LEVERAGE)
-                    sl = strategy.get_stop_loss_price(price, side)
-                    tp = strategy.get_take_profit_price(price, side)
+                    # ВХІД
+                    kline = session.get_kline(category="linear", symbol=symbol, interval="15", limit=50)
+                    df = pd.DataFrame(kline['result']['list'], columns=['time','open','high','low','close','volume','turnover'])
+                    df[['close','high','low','open','volume']] = df[['close','high','low','open','volume']].astype(float)
+                    df = df.iloc[::-1].reset_index(drop=True)
+
+                    signal, rel_vol = strategy.check_signals(df)
+                    if signal != "WAIT":
+                        side = "Buy" if signal == "BUY" else "Sell"
+                        price = float(session.get_tickers(category="linear", symbol=symbol)['result']['list'][0]['lastPrice'])
+                        qty = strategy.calculate_qty(price, COST_PER_TRADE, LEVERAGE)
+                        sl = strategy.get_stop_loss_price(price, side)
+                        tp = strategy.get_take_profit_price(price, side)
+                        
+                        session.place_order(
+                            category="linear", symbol=symbol, side=side, orderType="Market", 
+                            qty=str(qty), stopLoss=str(sl), takeProfit=str(tp)
+                        )
+                        active_tracking[symbol] = {'time': datetime.now(), 'rel_vol': rel_vol}
+                        bot.send_message(TG_CHAT_ID, f"🚀 *ВХІД {symbol}* (Vol x{rel_vol})\n🎯 TP: {tp}\n🛡 SL: {sl}")
                     
-                    session.place_order(
-                        category="linear", symbol=symbol, side=side, orderType="Market", 
-                        qty=str(qty), stopLoss=str(sl), takeProfit=str(tp)
-                    )
-                    active_tracking[symbol] = {'time': datetime.now(), 'rel_vol': rel_vol}
-                    bot.send_message(TG_CHAT_ID, f"🚀 *ВХІД {symbol}* (Vol x{rel_vol})\n🎯 TP: {tp}\n🛡 SL: {sl}")
+                    time.sleep(0.2) # Маленька пауза, щоб не спамити Bybit
+                except Exception as e:
+                    print(f"Error in symbol {symbol}: {e}")
 
-        except Exception as e: print(f"Error: {e}")
+        except Exception as e: 
+            print(f"Global Loop Error: {e}")
+        
         time.sleep(60)
 
 if __name__ == "__main__":
